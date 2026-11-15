@@ -23,6 +23,12 @@ def main():
         opts = "" if t in ("market", "cost") else ", types={'fips': 'VARCHAR'}"
         con.execute(f"CREATE TABLE {t} AS SELECT * FROM read_csv_auto('{RAW / (t + '.csv')}'{opts})")
         print(f"{t:<15} {con.execute(f'SELECT count(*) FROM {t}').fetchone()[0]:>6} rows")
+    if (RAW / "weather_month.csv").exists():        # optional: month-by-month weather for the rotation water balance
+        con.execute(f"CREATE TABLE weather_month AS SELECT * FROM read_csv_auto('{RAW / 'weather_month.csv'}', "
+                    "types={'fips': 'VARCHAR'})")
+        print(f"{'weather_month':<15} {con.execute('SELECT count(*) FROM weather_month').fetchone()[0]:>6} rows")
+    else:
+        print("weather_month   not found -- run pipeline/fetch_power.py to add month-by-month rain")
     source = (RAW / "SOURCE.txt").read_text().strip() if (RAW / "SOURCE.txt").exists() else "sample"
     con.execute("CREATE TABLE meta AS SELECT ? AS source", [source])
     con.close()

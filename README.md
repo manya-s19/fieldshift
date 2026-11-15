@@ -5,7 +5,9 @@ A web dashboard plus a text-alert channel that tells a farmer what to plant next
 1. **Climate fit**: how each crop yields in this county across the weather it actually gets (NASA POWER).
 2. **Market cycle**: whether everyone else is about to plant the same thing, and what that does to the harvest price (USDA).
 
-MVP scope: Kansas, 14 counties, four crops (winter wheat, corn, sorghum, soybeans).
+The main view, **My rotation**, answers the challenge brief: a farmer picks what they grow now and sees it beside the two rotations that best fit their priorities (income, getting through a bad year, saving water, looking after the soil). Each option shows its evidence, benefits, information gaps and risks to check locally.
+
+MVP scope: Kansas, 14 counties, four crops (winter wheat, corn, sorghum, soybeans), eight rotations.
 
 ## Run it
 
@@ -36,11 +38,21 @@ The two fetch scripts were written against the API documentation but have **not 
 | Path | What it does |
 |---|---|
 | `app.py` | The dashboard: recommendation, market cycles, regional stress, backtest |
+| `fs/rotations.py` | The eight rotations, water balance, soil-care score, ranking and the plain-language explanations |
 | `fs/models.py` | Cobweb phase labeller, supply-response and price models, yield model, margin simulation, ranking |
 | `fs/backtest.py` | Walk-forward backtest against two baselines |
 | `fs/alerts.py` | Builds the SMS text; `send_sms` is the stub to wire to Twilio |
 | `fs/config.py` | Counties, crops, thresholds |
 | `pipeline/` | Sample-data generator, real-data fetchers, DuckDB builder |
+
+## How rotations are compared
+
+- **Income / bad year**: the single-season margins below, summed over the crops in the rotation with shared weather, divided by years in the cycle. Idle-ground and cover-crop costs are entered in the sidebar (the defaults are guesses).
+- **Water**: the rotation is replayed through NASA POWER monthly rain from every start year. Supply = rain while the crop is in the ground + 25% of rain on the idle months before it (USDA ARS: fallow loses 65-80% to evaporation). Need = midpoint of the FAO (1986) range per crop.
+- **Soil care**: average of living-root months, crop variety, legume present, heavy-residue crops. A rule of thumb, not a soil test.
+- **Months idle**: from typical Kansas planting and harvest months in `fs/rotations.py`.
+
+Month-by-month rain comes from `pipeline/fetch_power.py` (`data/raw/weather_month.csv`). Until that file is built into the database, water figures show as n/a.
 
 ## How a recommendation is made
 

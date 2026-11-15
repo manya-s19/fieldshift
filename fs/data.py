@@ -15,6 +15,7 @@ class Tables:
     market: pd.DataFrame
     cost: pd.DataFrame
     source: str          # "sample" or "real"
+    month: pd.DataFrame | None = None   # month-by-month NASA weather (optional)
 
     @property
     def last_year(self) -> int:
@@ -36,5 +37,7 @@ def load() -> Tables:
         cost=q("SELECT * FROM cost ORDER BY crop, year"),
         source=q("SELECT source FROM meta").source[0],
     )
+    if q("SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'weather_month'").n[0]:
+        t.month = q("SELECT * FROM weather_month ORDER BY fips, year, month")
     con.close()
     return t

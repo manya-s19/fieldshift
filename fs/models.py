@@ -138,6 +138,7 @@ class Season:
         self.ymodels = fit_yield_models(tables.crop_year, tables.weather, target)
         cost = tables.cost[tables.cost.year <= target].sort_values("year").groupby("crop").cost_per_acre.last()
         self.cost = cost.to_dict()
+        self._draws = {}
 
     def county(self, fips: str, outlook: str = "normal", price_mode: str = "cycle") -> pd.DataFrame:
         """Rank crops for one county.
@@ -148,7 +149,7 @@ class Season:
         wx = weather_scenarios(self.t.weather, fips, self.target, outlook)
         rng = np.random.default_rng(self.target)
         pick = rng.choice(len(wx), size=self.n, p=wx.weight.to_numpy())   # same seasons for every crop
-        rows = []
+        rows, draws = [], {}
         for crop in CROPS:
             m = self.ymodels[crop]
             if fips not in m["fips"]:
@@ -160,6 +161,7 @@ class Season:
             centre = mk.exp_price if price_mode == "cycle" else mk.last_price
             prices = centre * np.exp(rng.normal(0, mk.price_sigma, self.n))
             margin = yields * prices - self.cost[crop]
+            draws[crop] = margin
             p10, p50, p90 = np.percentile(margin, [10, 50, 90])
             dry_yield = float(np.average(y_by_season, weights=(wx.gs_precip <= wx.gs_precip.quantile(1 / 3))))
             rows.append(dict(
@@ -169,7 +171,15 @@ class Season:
                 p10=p10, p50=p50, p90=p90, loss_odds=float((margin < 0).mean()),
                 score=p50 - RISK_AVERSION * (p50 - p10),
                 phase=mk.phase, acres_chg=float(mk.acres_chg), acre_z=float(mk.acre_z)))
+        self._draws[(fips, outlook, price_mode)] = draws
         return pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+
+    def margin_draws(self, fips: str, outlook: str = "normal", price_mode: str = "cycle") -> dict:
+        """Simulated one-season margins per crop ({crop: array}). All crops share the same weather draws."""
+        key = (fips, outlook, price_mode)
+        if key not in self._draws:
+            self.county(fips, outlook, price_mode)
+        return self._draws[key]
 
 
 def soil_stress(weather: pd.DataFrame, year: int) -> pd.DataFrame:

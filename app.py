@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from fs import alerts, backtest, data, models
+from fs import alerts, backtest, data, models, rotations
 from fs.config import CROP_COLOR, CROP_LABEL, CROPS, DB_PATH, STATE_NAME, TRAIL_YEARS
 
 st.set_page_config(page_title="Field Shift", page_icon="🌾", layout="wide")
@@ -61,9 +61,27 @@ with st.sidebar:
     st.caption(f"{STATE_NAME} · planning the {TARGET} season")
     fips = st.selectbox("County", T.county.fips, format_func=lambda f: f"{names[f]} County",
                         index=int((T.county.name == "Finney").idxmax()) if "Finney" in set(T.county.name) else 0)
+    current_id = st.selectbox("What I grow now", [r.id for r in rotations.ROTATIONS],
+                              format_func=lambda i: rotations.BY_ID[i].name)
+    can_grow = st.multiselect("Crops I can grow", CROPS, default=CROPS, format_func=CROP_LABEL.get,
+                              help="Leave out any crop you have no equipment or market for.")
+    cover_ok = st.checkbox("I could plant a cover crop", value=True)
+
+    st.markdown("**What matters most to me**")
+    st.caption("0 = does not matter, 5 = matters most")
+    weights = dict(
+        income=st.slider("Income", 0, 5, 3),
+        risk=st.slider("Getting through a bad year", 0, 5, 3),
+        water=st.slider("Saving water", 0, 5, 3),
+        soil=st.slider("Looking after the soil", 0, 5, 3))
+
+    farm_acres = st.number_input("Field size (acres)", 10, 20000, 500, step=10)
     outlook = OUTLOOKS[st.radio("Season outlook", list(OUTLOOKS), index=1,
                                 help="Tilts the odds toward this county's driest or wettest past seasons.")]
-    farm_acres = st.number_input("Field size (acres)", 10, 20000, 500, step=10)
+    with st.expander("My costs"):
+        st.caption("Starting guesses, not survey figures. Put in your own.")
+        idle_cost = st.number_input("Weed control on idle ground ($ per acre, per 12 idle months)", 0, 200, 30)
+        cover_cost = st.number_input("Cover crop seed and planting ($ per acre)", 0, 200, 35)
 
     base_market = get_season(stamp, TARGET, None).market
     intentions = None
@@ -90,8 +108,165 @@ if T.source != "real":
                "loaded. Run `pipeline/fetch_power.py` and `pipeline/fetch_nass.py` to switch to NASA and USDA data.",
                icon="⚠️")
 
-tab_rec, tab_cycle, tab_map, tab_bt, tab_about = st.tabs(
-    ["Recommendation", "Market cycles", "Regional stress", "Backtest", "How it works"])
+tab_rot, tab_rec, tab_cycle, tab_map, tab_bt, tab_about = st.tabs(
+    ["My rotation", "This season's crop", "Market cycles", "Regional stress", "Backtest", "How it works"])
+
+# ----------------------------------------------------------------------------- rotations (farmer view)
+
+SEG_COLOR = {**CROP_COLOR, rotations.BARE: "#e7e4da", rotations.COVER: "#a48be0"}
+
+
+def rotation_strip(rot):
+    """A coloured bar: one segment per stage of the rotation, width = months."""
+    segs = ""
+    for kind, m, n in rotations.timeline(rot):
+        end = rotations.MONTHS[(m - 1 + n - 1) % 12]
+        tip = f"{rotations.PHASE_LABEL[kind]}: {rotations.MONTHS[m - 1]} to {end} ({n} months)"
+        abbr = {"wheat": "Wht", "corn": "Corn", "sorghum": "Sor", "soybeans": "Soy", rotations.COVER: "Cov"}
+        label = "" if kind == rotations.BARE else (rotations.PHASE_SHORT[kind] if n / rot.months >= 0.2 else abbr[kind])
+        segs += (f'<div title="{html.escape(tip)}" style="flex:{n};background:{SEG_COLOR[kind]};color:#0b0b0b;'
+                 f'font-size:12px;font-weight:600;line-height:30px;height:30px;text-align:center;overflow:hidden;'
+                 f'white-space:nowrap;border-right:2px solid #fff;">{label}</div>')
+    years = "".join(f'<div style="flex:1;font-size:12px;color:#6b6a65;border-left:1px solid #b5b3aa;'
+                    f'padding-left:4px;">Year {y + 1}</div>' for y in range(rot.years))
+    return (f'<div style="display:flex;border-radius:6px;overflow:hidden;">{segs}</div>'
+            f'<div style="display:flex;margin:2px 0 6px;">{years}</div>')
+
+
+def phone(*messages, footer=""):
+    bubbles = "".join(
+        f'<div style="background:#e4e3df;color:#0b0b0b;border-radius:18px 18px 18px 4px;padding:10px 13px;'
+        f'margin-top:12px;font-size:14.5px;line-height:1.4;">{html.escape(m)}</div>' for m in messages)
+    return f"""
+<div style="max-width:320px;margin:0 auto;border:10px solid #1a1a19;border-radius:34px;background:#f4f4f2;
+            padding:18px 14px 26px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
+  <div style="text-align:center;color:#52514e;font-size:12px;">Field Shift Alerts<br>
+       <span style="color:#898781;">Text message · today</span></div>{bubbles}{footer}
+</div>"""
+
+
+with tab_rot:
+    ev = rotations.evaluate(season, T, fips, outlook, idle_cost, cover_cost)
+
+    def can_run(i):
+        r = rotations.BY_ID[i]
+        return i == current_id or (set(r.crops) <= set(can_grow) and (cover_ok or not r.has_cover))
+
+    ev = ev[[can_run(i) for i in ev.index]]
+    if current_id not in ev.index:
+        st.error("There is not enough yield history in this county for that rotation. Pick another under "
+                 "'What I grow now'.")
+        st.stop()
+    rk = rotations.rank(ev, weights)
+    cur = rk.loc[current_id]
+    alts = rk[rk.id != current_id].head(2)
+    has_water = bool(rk.water_dry.notna().any())
+
+    st.markdown(f"### {county} County: what you grow now, beside the two options that fit you best")
+    st.caption("A starting point for a talk with your agronomist or extension agent. It shows patterns in the "
+               "records; it does not know your fields. Move the sliders on the left and the order changes.")
+    if not has_water:
+        st.info("Water figures are switched off until month-by-month NASA rain is loaded. Run "
+                "`python pipeline/fetch_power.py` and then `python pipeline/build_db.py`.", icon="💧")
+    if len(alts) == 0:
+        st.warning("No other rotation fits the crops you ticked. Tick more crops on the left to see options.")
+    elif rk.iloc[0].id == current_id:
+        st.success("What you grow now already fits your priorities best. The other two are the next closest.",
+                   icon="✅")
+    st.markdown(
+        "".join(f'<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:'
+                f'{SEG_COLOR[k]};margin:0 6px 0 14px;vertical-align:-1px;"></span>'
+                f'<span style="font-size:13px;color:#52514e;">{rotations.PHASE_LABEL[k]}</span>'
+                for k in [*CROPS, rotations.COVER, rotations.BARE]), unsafe_allow_html=True)
+
+    badges = [":gray-badge[What you grow now]", ":green-badge[Best fit for your priorities]",
+              ":blue-badge[Also worth a look]"]
+    shown = [cur] + [alts.iloc[i] for i in range(len(alts))]
+    for col, row, badge in zip(st.columns(3, gap="medium"), shown, badges):
+        rot, is_cur = rotations.BY_ID[row.id], row.id == current_id
+        with col, st.container(border=True):
+            st.markdown(badge)
+            st.markdown(f"#### {row['name']}")
+            st.markdown(rotation_strip(rot), unsafe_allow_html=True)
+            a, b = st.columns(2)
+            a.metric("Normal year", f"{rotations.money(row.p50)}/ac",
+                     None if is_cur else f"{rotations.money(row.p50 - cur.p50)} vs now",
+                     help="Income per acre per year after seed, fertiliser and other running costs.")
+            b.metric("Bad year", f"{rotations.money(row.p10)}/ac",
+                     None if is_cur else f"{rotations.money(row.p10 - cur.p10)} vs now",
+                     help="One year in ten is worse than this.")
+            a.metric("Water need met", "n/a" if pd.isna(row.water_dry) else f"{row.water_dry:.0%}",
+                     None if is_cur or pd.isna(row.water_dry) else f"{(row.water_dry - cur.water_dry) * 100:+.0f} pts",
+                     help="Share of what the crops need that rain and banked fallow moisture supplied, in the "
+                          "driest one in five runs of the NASA record.")
+            b.metric("Soil care", f"{row.soil:.0f}/100", None if is_cur else f"{row.soil - cur.soil:+.0f}",
+                     help="Rule-of-thumb score: living roots, crop variety, nitrogen from legumes, residue.")
+            a.metric("Months idle a year", f"{row.bare_per_year:.1f}",
+                     None if is_cur else f"{row.bare_per_year - cur.bare_per_year:+.1f}", delta_color="inverse",
+                     help="Months in an average year with no crop or cover crop growing.")
+            b.metric("Fit to my priorities", f"{row.fit:.0f}/100",
+                     help="How well it matches the sliders, compared with the other options.")
+            st.markdown(f"**Why it is here.** {rotations.why(row, cur, weights)}")
+            st.caption(f"On {farm_acres:,} acres: about {rotations.money(row.p50 * farm_acres)} in a normal year, "
+                       f"{rotations.money(row.p10 * farm_acres)} in a bad one.")
+            with st.expander("Evidence, benefits, gaps and risks"):
+                st.markdown("**What the records show**")
+                for line in rotations.evidence(row, rot, county):
+                    st.markdown(f"- {line}")
+                st.markdown("**What it may do for you**")
+                for line in rot.benefits:
+                    st.markdown(f"- {line}")
+                st.markdown("**Risks to check locally**")
+                for line in rot.risks:
+                    st.markdown(f"- {line}")
+                st.markdown("**What this tool does not know**")
+                for line in rotations.COMMON_GAPS:
+                    st.markdown(f"- {line}")
+
+    left, right = st.columns([5, 3], gap="large")
+    with left:
+        st.markdown("#### Every option, in order of fit")
+        st.dataframe(pd.DataFrame({
+            "Rotation": rk["name"], "Fit": rk.fit, "Normal year $/ac": rk.p50.map(rotations.money),
+            "Bad year $/ac": rk.p10.map(rotations.money), "Water need met, dry years": rk.water_dry * 100,
+            "Soil care": rk.soil, "Months idle a year": rk.bare_per_year, "Years in cycle": rk.years,
+        }), hide_index=True, width="stretch", column_config={
+            "Fit": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
+            "Water need met, dry years": st.column_config.NumberColumn(format="%.0f%%"),
+            "Soil care": st.column_config.NumberColumn(format="%.0f"),
+            "Months idle a year": st.column_config.NumberColumn(format="%.1f")})
+        if has_water:
+            st.markdown(f"#### When the rain falls in {county} County")
+            mon = T.month[T.month.fips == fips].groupby("month").precip.mean() / rotations.MM_PER_INCH
+            fig = go.Figure(go.Bar(x=[rotations.MONTHS[m - 1] for m in mon.index], y=mon.values,
+                                   marker_color="#2a78d6", text=[f"{v:.1f}" for v in mon.values],
+                                   textposition="outside",
+                                   hovertemplate="%{x}: %{y:.1f} in on average<extra></extra>"))
+            fig.update_yaxes(title_text="inches", rangemode="tozero")
+            fig.update_layout(bargap=0.25, showlegend=False)
+            st.plotly_chart(base_layout(fig, 300), width="stretch")
+            st.caption(f"Average rain by month, NASA POWER, {int(T.month.year.min())}-{int(T.month.year.max())}. "
+                       "Compare it with the coloured bars above: rain that falls on idle ground is mostly lost.")
+    with right:
+        st.markdown("#### The same advice as a text")
+        best_row = rk.iloc[0]
+        sms = rotations.sms_text(county, cur, best_row)
+        st.markdown(phone(sms), unsafe_allow_html=True)
+        st.caption(f"Mock-up of the text a farmer receives ({len(sms)} characters).")
+
+    with st.expander("What the words mean"):
+        st.markdown("""
+- **Fallow / idle ground**: a stretch with no crop in the field, used in dry country to let rain soak in for the next crop.
+- **Cover crop**: something planted to protect and feed the soil, not to harvest. It can be grazed.
+- **Legume**: a crop such as soybeans that takes nitrogen from the air and leaves some in the soil.
+- **Residue**: the stalks and straw left after harvest. Heavy residue shields soil from wind and rain.
+- **Crop water need**: the water a crop uses to grow a full yield. Scientists call it evapotranspiration.
+- **Banked moisture**: rain stored in the soil during idle months. About a quarter is still there at planting; the rest evaporates.
+- **Bad year**: one year in ten turns out worse than this figure.
+- **Dry years**: the driest one in five runs of the rotation through NASA's rain record for your county.
+- **Satellite versus rain gauge**: NASA figures are averages over an area about 50 km wide. They are consistent everywhere and go back decades, but a gauge on your farm records your own storms better.
+""")
+
 
 # ----------------------------------------------------------------------------- recommendation
 
@@ -337,7 +512,25 @@ with tab_bt:
 
 with tab_about:
     st.markdown(f"""
-#### What the recommendation is made of
+#### How rotations are compared (the "My rotation" tab)
+Eight rotations common in Kansas are scored on four things, and the sliders decide how much each counts.
+
+- **Income and bad year.** The single-season margin model below is run for every crop in the rotation with the
+  same simulated weather, added up, and divided by the years in the cycle. Idle ground and cover crops carry the
+  costs you enter. Prices are each crop's 10-year normal.
+- **Water.** The rotation is replayed through NASA POWER monthly rain from every possible start year. A crop's
+  supply is the rain while it is in the ground plus a quarter of the rain on the idle months before it
+  (USDA ARS: fallow loses 65 to 80% of precipitation to evaporation). Crop water needs are FAO (1986) reference
+  ranges: corn 500-800 mm, sorghum 450-650, soybeans 450-700, wheat 450-650; the midpoint is used.
+- **Soil care.** The average of four parts, each 0 to 100: share of months with living roots, number of
+  different kinds of crop, whether a legume is included, and share of crops that leave heavy residue. It
+  follows the soil-health principles (keep the soil covered, keep roots alive, grow a variety). It is a rule
+  of thumb, not a soil test.
+- **Months idle.** Counted from typical Kansas planting and harvest months.
+
+This tool supports a decision. It does not replace the farmer's judgment or local agronomy advice.
+
+#### What the single-season recommendation is made of
 0. **Dryland footing.** USDA county yields mix irrigated and dryland fields. Each crop's yield is scaled by
    the county's typical dryland-to-all-fields ratio, so thirsty irrigated crops are not flattered.
 1. **Climate fit.** For each crop, yield is regressed on growing-season rain, heat days (above 35 °C), a
@@ -355,12 +548,16 @@ with tab_about:
 | Table | Real source | Script |
 |---|---|---|
 | Weather, soil wetness | NASA POWER daily API (`PRECTOTCORR`, `T2M_MAX`, `GWETROOT`) | `pipeline/fetch_power.py` |
+| Crop water needs | FAO (1986), Irrigation Water Management: Irrigation Water Needs | `fs/rotations.py` |
+| Fallow moisture storage | USDA ARS, Agricultural Research magazine, Jan 2011 | `fs/rotations.py` |
 | County yield and area, US planted area, Kansas prices | USDA NASS QuickStats | `pipeline/fetch_nass.py` |
 | Cost per acre | USDA ERS Commodity Costs and Returns | edit `data/raw/cost.csv` |
 
 Currently loaded: **{'real data' if T.source == 'real' else 'simulated sample data'}**.
 
 #### Known limits
+- Rotation yields ignore what was grown before; rotation calendars are typical months, not local dates.
+- Simulated prices move independently between crops, so real-world risk for mixed rotations is somewhat higher.
 - Prices are state-level and applied to every county; costs are regional.
 - The crowding signal is a forecast of planted area, so read it as a lean, not a measurement. Swap in USDA
   Prospective Plantings (sidebar) or satellite greenness (MODIS NDVI) once the season starts.

@@ -1,7 +1,7 @@
 """Pull real weather for every county from the NASA POWER API (no key needed)
 and aggregate it to one row per county-season.
 
-Output: data/raw/weather_season.csv and data/raw/county.csv
+Output: data/raw/weather_season.csv, data/raw/weather_month.csv and data/raw/county.csv
 
 Usage:  python pipeline/fetch_power.py            # START_YEAR .. last full year
         python pipeline/fetch_power.py 2000 2026
@@ -20,6 +20,7 @@ from fs.config import COUNTIES, HEAT_DAY_C, RAW, START_YEAR  # noqa: E402
 URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 PARAMS = "PRECTOTCORR,T2M_MAX,GWETROOT"   # rain mm/day, max temp C, root-zone soil wetness 0-1
 FILL = -999.0
+HEAVY_RAIN_MM = 25.0                      # a "heavy-rain day" (about one inch)
 
 
 def fetch_point(lat, lon, start, end):
@@ -50,18 +51,39 @@ def season_rows(fips, daily):
     return rows
 
 
+def month_rows(fips, daily):
+    """One row per county-month: rain, heat, soil wetness, heavy-rain days. Incomplete months are skipped."""
+    rows = []
+    for (yr, mo), d in daily.groupby([daily.index.year, daily.index.month]):
+        if d["PRECTOTCORR"].notna().sum() < d.index.days_in_month[0] - 2:
+            continue
+        rows.append(dict(
+            fips=fips, year=yr, month=mo,
+            precip=round(d["PRECTOTCORR"].sum(), 1),
+            heavy_days=int((d["PRECTOTCORR"] >= HEAVY_RAIN_MM).sum()),
+            tmax=round(d["T2M_MAX"].mean(), 2),
+            soil_wet=round(d["GWETROOT"].mean(), 3),
+        ))
+    return rows
+
+
 def main():
     start = int(sys.argv[1]) if len(sys.argv) > 1 else START_YEAR
     end = int(sys.argv[2]) if len(sys.argv) > 2 else date.today().year - (date.today().month < 11)
     RAW.mkdir(parents=True, exist_ok=True)
-    rows = []
+    rows, months = [], []
     for fips, name, lat, lon in COUNTIES:
         print(f"POWER  {name:<10} ({lat}, {lon})  {start}-{end}")
-        rows += season_rows(fips, fetch_point(lat, lon, start, end))
+        daily = fetch_point(lat, lon, start, end)
+        rows += season_rows(fips, daily)
+        months += month_rows(fips, daily)
         time.sleep(1)                        # be polite to the API
     pd.DataFrame(rows).to_csv(RAW / "weather_season.csv", index=False)
+    pd.DataFrame(months).to_csv(RAW / "weather_month.csv", index=False)
     pd.DataFrame(COUNTIES, columns=["fips", "name", "lat", "lon"]).to_csv(RAW / "county.csv", index=False)
     print(f"Wrote {len(rows)} county-seasons to {RAW / 'weather_season.csv'}")
+    print(f"Wrote {len(months)} county-months to {RAW / 'weather_month.csv'}")
+    print("Next: python pipeline/build_db.py")
 
 
 if __name__ == "__main__":
